@@ -342,26 +342,52 @@ __global__ void runBasic(int M, int N, int K, float alpha, float *A, float *B, f
 
 __global__ void runGmemCoalesced(int M, int N, int K, float alpha, float *A, float *B, float beta, float *C)
 {
-    // HW1 TODO: copy runBasic() code here and update to avoid uncoalesced accesses to global memory.
-    // Note, you are also free to change the grid dimensions in the kernel launch below.
+    const unsigned x = blockIdx.x * blockDim.x + threadIdx.x;
+    const unsigned y = blockIdx.y * blockDim.y + threadIdx.y;
 
+    if (x < N && y < M)
+    {
+        float tmp = 0.0;
+        // C = α*(AxB)+β*C
+        for (int i = 0; i < K; ++i)
+        {
+            tmp += A[(y * K) + i] * B[(i * N) + x];
+        }
+        C[(y * N) + x] = (alpha * tmp) + (beta * C[y * N + x]);
+    }
 }
 
 const uint F = 32;
 
 __global__ void runSharedMem(int M, int N, int K, float alpha, float *A, float *B, float beta, float *C)
 {
-    // HW2 TODO: Use shared memory to cache square FxF tiles of the A and B matrices in shared memory 
-    // (SA and SB, respectively, provided below). Each thread should compute the result for one cell 
-    // of the output matrix C.
-
-    // Note, you will also need to change the grid dimensions in the kernel launch below to take into account the value
-    // of F (which is a constant, defined above). You should experiment with different values of F to see how it 
-    // affects performance.
-
     __shared__ float SA[F][F];
     __shared__ float SB[F][F];
 
+    int row = blockIdx.y * blockDim.y + threadIdx.y;
+    int col = blockIdx.x * blockDim.x + threadIdx.x;
+    float sum = 0.0;
+
+    for (int i = 0; i < N; i += F) {
+        SA[threadIdx.y][threadIdx.x] = A[row * N + i + threadIdx.x];
+        SB[threadIdx.y][threadIdx.x] = B[(i + threadIdx.y) * N + col];
+        __syncthreads();
+
+        for (int t = 0; t < F; ++t) {
+            sum += SA[threadIdx.y][t] * SB[t][threadIdx.x];
+        }
+        __syncthreads();
+    }
+
+    if (row < N && col < M) {
+        // We already assert that SIZE % F == 0, 
+        // so there will not be any corner cases.
+        // int upper = (N / F) * F;
+        // for (int i = 0; i < N % F; ++i) {
+        //     sum += A[row * N + upper + i] * B[(upper + i) * N + col];
+        // }
+        C[row * N + col] = alpha * sum + beta * C[row * N + col];
+    }
 }
 
 const uint G = 4;
@@ -409,9 +435,8 @@ void runAlgo(Algo algo, cublasHandle_t handle, int M, int N, int K, float alpha,
         assert(0 == M % F);
         assert(0 == N % F);
         assert(0 == K % F);
-        // TODO: update your grid here
-        dim3 gridDim(ROUND_UP_TO_NEAREST(M, 32), ROUND_UP_TO_NEAREST(N, 32));
-        dim3 blockDim(32, 32);
+        dim3 gridDim(ROUND_UP_TO_NEAREST(M, F), ROUND_UP_TO_NEAREST(N, F));
+        dim3 blockDim(F, F);
         runSharedMem<<<gridDim, blockDim>>>(M, N, K, alpha, A, B, beta, C);
         break;
     }
